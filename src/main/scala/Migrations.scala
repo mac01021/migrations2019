@@ -8,6 +8,8 @@ import scala.reflect.ClassTag
 import scala.util.Random
 
 object Migrations {
+  
+  val random = new Random(27)
 
   type Node = Int
   /**
@@ -68,7 +70,7 @@ object Migrations {
   }
 
   object File {
-    def random(nbNodes: Int): File = new File(Random.between(1, nbNodes+1), Random.between(1, nbNodes+1))
+    def random(nbNodes: Int): File = new File(random.between(1, nbNodes+1), random.between(1, nbNodes+1))
   }
 
 
@@ -89,7 +91,7 @@ object Migrations {
       }
     }
 
-    def shuffle: Instance = new Instance(Random.shuffle(files), nifs)
+    def shuffle: Instance = new Instance(random.shuffle(files), nifs)
 
     def augment(sent: Set[File]): Instance = {
       val remainingFiles = for { file <- files
@@ -116,7 +118,7 @@ object Migrations {
 
       val nifs = new Sequence[Int](1 to N) {
         for { n <- 1 to N } {
-          this(n) = Random.between(minC, maxC+1)
+          this(n) = random.between(minC, maxC+1)
         }
       }
 
