@@ -2,14 +2,19 @@ import ch.qos.logback.classic.{Level, Logger}
 import optimus.algebra.{Expression, Zero}
 import optimus.optimization.model.{MPBinaryVar, MPIntVar}
 
-import scala.collection.{LazyZip4, mutable}
+import scala.collection.{mutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 import scala.util.Random
 
 object Migrations {
   
-  val random = new Random(27)
+  val PRNG = new Random(27)
+  implicit class RichRandom(random: Random) {
+    def between(lo: Int, up: Int) = {
+      random.nextInt(up-lo) + lo
+    }
+  }
 
   type Node = Int
   /**
@@ -17,7 +22,7 @@ object Migrations {
     * @param rng
     * @tparam E
     */
-  class Sequence[E](val rng: Range)(implicit classTag: ClassTag[E]) extends Iterable[E] {
+  class Sequence[E <: AnyRef](val rng: Range)(implicit classTag: ClassTag[E]) extends Iterable[E] {
     private val array: Array[E] = if (rng.step != 1) throw new IllegalArgumentException else new Array(rng.length)
     def apply(i: Int): E = array(i-rng.start)
     def update(i: Int, e: E) = array(i-rng.start) = e
@@ -39,9 +44,48 @@ object Migrations {
       clone
     }
 
-    def sortInPlaceBy[B](f: E=>B)(implicit ord: Ordering[B]) = array.sortInPlaceBy(f)
+    def sortInPlaceBy[B](f: E=>B)(implicit ord: Ordering[B]) = java.util.Arrays.sort(array, ord on f)
 
     override def iterator: Iterator[E] = array.iterator
+  }
+
+  class IntSequence(val rng: Range) extends Iterable[Int] {
+    private var array: Array[Int] = if (rng.step != 1) throw new IllegalArgumentException else new Array(rng.length)
+    def apply(i: Int): Int = array(i-rng.start)
+    def update(i: Int, e: Int) = array(i-rng.start) = e
+    def length = array.length
+
+    override def toString: String = {
+      val buf = new StringBuilder
+      for { idx <- rng } {
+        buf append s"$idx: ${this(idx)}\n"
+      }
+      buf.toString()
+    }
+
+    def copy: IntSequence = {
+      val clone = new IntSequence(rng)
+      for { i <- rng } {
+        clone(i) = this(i)
+      }
+      clone
+    }
+
+    def sortInPlaceBy[B](f: Int=>B)(implicit ord: Ordering[B]) = {
+      array = array.sortBy(f)
+    }
+
+    override def iterator: Iterator[Int] = array.iterator
+  }
+
+
+
+  class BoolSequence(val rng: Range) extends Iterable[Boolean] {
+    private var array: Array[Boolean] = if (rng.step != 1) throw new IllegalArgumentException else new Array(rng.length)
+    override def iterator: Iterator[Boolean] = array.iterator
+    def apply(i: Int): Boolean = array(i-rng.start)
+    def update(i: Int, e: Boolean) = array(i-rng.start) = e
+    def length = array.length
   }
 
   def time(block: => Schedule): Schedule = {
@@ -70,7 +114,7 @@ object Migrations {
   }
 
   object File {
-    def random(nbNodes: Int): File = new File(random.between(1, nbNodes+1), random.between(1, nbNodes+1))
+    def random(nbNodes: Int): File = new File(PRNG.between(1, nbNodes+1), PRNG.between(1, nbNodes+1))
   }
 
 
@@ -80,18 +124,18 @@ object Migrations {
     * @param files
     * @param nifs
     */
-  class Instance(val files: Seq[File], val nifs: Sequence[Int], var space: Sequence[Int] = null) {
+  class Instance(val files: Seq[File], val nifs: IntSequence, var space: IntSequence = null) {
     val nodes = nifs.rng
 
     if (space==null) {
-      space = new Sequence[Int](nodes)
+      space = new IntSequence(nodes)
       for {node <- nodes} {
         space(node) = 1 + Math.max(files.count(_.src == node),
                                    files.count(_.dst == node))
       }
     }
 
-    def shuffle: Instance = new Instance(random.shuffle(files), nifs)
+    def shuffle: Instance = new Instance(PRNG.shuffle(files), nifs)
 
     def augment(sent: Set[File]): Instance = {
       val remainingFiles = for { file <- files
@@ -111,14 +155,20 @@ object Migrations {
 
       "Space:\n"+space+"\n\nNifs:\n"+nifs+"\n\nFiles:\n"+buf
     }
+
+    def spacify: Instance = new Instance(files, nifs, new IntSequence(nodes) {
+      for { node <- nodes } {
+        this(node) = Int.MaxValue
+      }
+    })
   }
 
   object Instance {
     def random(N: Int, F: Int, minC: Int = 1, maxC: Int = 10)  = {
 
-      val nifs = new Sequence[Int](1 to N) {
+      val nifs = new IntSequence(1 to N) {
         for { n <- 1 to N } {
-          this(n) = random.between(minC, maxC+1)
+          this(n) = PRNG.between(minC, maxC+1)
         }
       }
 
@@ -136,8 +186,8 @@ object Migrations {
     * A schedule is a sequence of stages, where each stage represents the set of files to be migrated at one time.
     * @param plan
     */
-  case class Schedule(plan: IterableOnce[Set[File]]){
-    val stages: Seq[Set[File]] = Seq.from(plan)
+  case class Schedule(plan: Seq[Set[File]]){
+    val stages: Seq[Set[File]] = for { fileset <- plan } yield fileset
 
     def length = stages.size
 
@@ -199,7 +249,7 @@ object Migrations {
   def scheduleByGreedyMatching(instance: Instance): Schedule = {
     val plan = new ArrayBuffer[Set[File]]()
     val alreadyScheduled = mutable.Set[File]()
-    val freeSpace = new Sequence[Int](instance.nodes) {
+    val freeSpace = new IntSequence(instance.nodes) {
       for { node <- instance.nodes } {
         this(node) = instance.space(node) - instance.files.count(_.src==node)
       }
@@ -218,7 +268,7 @@ object Migrations {
         freeSpace(file.dst) = freeSpace(file.dst) - 1
         alreadyScheduled += file
       }
-      plan += Set.from(currentStage)
+      plan += currentStage.toSet
     }
 
     while (alreadyScheduled.size < instance.files.size) {
@@ -288,18 +338,21 @@ object Migrations {
 
 
   def scheduleByDstSpace(instance: Instance): Schedule = {
+    import scala.collection.JavaConverters._
+
 
     val rounds = new ArrayBuffer[Set[File]]
 
-    val freeSpace: Sequence[Int] = instance.space.copy
+    val freeSpace: IntSequence = instance.space.copy
     for { f <- instance.files } freeSpace(f.src) = freeSpace(f.src) - 1
-    val files = ArrayBuffer.from(instance.files)
+    val files = instance.files.toBuffer
 
     var freeCapacity = instance.nifs.copy
 
     var currentRound = Set[File]()
     while (files.size > 0) {
-      files.sortInPlaceBy[Int](f => -freeSpace(f.dst))
+      val ascendingFreeSpace: File=>Int = f => -freeSpace(f.dst)
+      files.asJava.sort(implicitly[Ordering[Int]] on ascendingFreeSpace)
       val fileToSchedule = files.find(file => freeCapacity(file.src) > 0 && freeCapacity(file.dst) > 0)
       if (fileToSchedule.isDefined) {
         files -= fileToSchedule.get
@@ -323,9 +376,9 @@ object Migrations {
     val rounds = new ArrayBuffer[Set[File]]
 
     val capacity = instance.nifs
-    val freeSpace: Sequence[Int] = instance.space.copy
+    val freeSpace: IntSequence = instance.space.copy
     for { f <- instance.files } freeSpace(f.src) = freeSpace(f.src) - 1
-    val files = ArrayBuffer.from(instance.files)
+    val files = instance.files.toBuffer
 
     //class Connections(val incoming: mutable.Set[File] = mutable.Set(), val outgoing: mutable.Set[File] = mutable.Set())
     val cxns = new Sequence[Connections](instance.nodes)
@@ -337,13 +390,13 @@ object Migrations {
 
     while (files.size > 0) {
       // Get the degrees of all the nodes
-      val degree = new Sequence[Int](instance.nodes)
+      val degree = new IntSequence(instance.nodes)
       for { f <- files } {
         degree(f.src) = degree(f.src) + 1
         degree(f.dst) = degree(f.dst) + 1
       }
       //sort the nodes by space and degree
-      val nodes = new Sequence[Int](instance.nodes)
+      val nodes = new IntSequence(instance.nodes)
       for { n <- nodes.rng } nodes(n) = n
       nodes.sortInPlaceBy(node => (-freeSpace(node), degree(node) * -1.0 / capacity(node)))
 
@@ -473,7 +526,7 @@ object Migrations {
 
 
   class Connections(val incoming: mutable.Set[File] = mutable.Set(), val outgoing: mutable.Set[File] = mutable.Set()) {
-    def copy = new Connections(mutable.Set.from(incoming), mutable.Set.from(outgoing))
+    def copy = new Connections(for {c <- incoming} yield c, for {c <- outgoing} yield c)
 
     override def toString: String =
       s"""incoming: $incoming
@@ -483,11 +536,11 @@ object Migrations {
 
   def scheduleByStructure(instance: Instance): Schedule = {
     val nodes = instance.nodes
-    val files = mutable.Set.from(instance.files)
+    val files = mutable.Set(instance.files :_*)
     val space = instance.space
     val c = instance.nifs
 
-    val freeSpace: Sequence[Int] = space.copy
+    val freeSpace: IntSequence = space.copy
     for { f <- files } freeSpace(f.src) = freeSpace(f.src) - 1
 
 
@@ -499,14 +552,14 @@ object Migrations {
     }
 
 
-    println("getting cycles...")
+    //println("getting cycles...")
     val cycles = getCycles(cxns.copy)
     //println("Got them")
     //println(s"Got cycles: $cycles")
     for { cycle <- cycles
           file <- cycle } files -= file
 
-    println("making dag...")
+    //println("making dag...")
     val dag = new Sequence[Connections](nodes)
     for {node <- nodes } dag(node) = new Connections()
     for { file <- files } {
@@ -515,7 +568,7 @@ object Migrations {
     }
 
     val cycleInstance = instance.augment(files.toSet)
-    println("schedulinging cycles...")
+    //println("schedulinging cycles...")
     val cycleSchedule = scheduleByGreedyMatching(cycleInstance)
 
 
@@ -524,16 +577,16 @@ object Migrations {
     //val dagInstance = instance.augment(cycles)
 
     val ranks = nodes
-    println("sorting dag...")
+    //println("sorting dag...")
     val nodesByRank = toposort(dag)
 
-    println("scheduling dag...")
+    //println("scheduling dag...")
     val dagRounds = new ArrayBuffer[Set[File]]()
     while (files.size > 0) {
       val lastSz = files.size
       var currentRound = Set[File]()
 
-      val degree = new Sequence[Int](instance.nodes)
+      val degree = new IntSequence(instance.nodes)
       for { f <- files } {
         degree(f.src) = degree(f.src) + 1
         degree(f.dst) = degree(f.dst) + 1
@@ -623,15 +676,15 @@ object Migrations {
     cycles
   }
 
-  private def toposort(cs: Migrations.Sequence[Migrations.Connections]): Sequence[Int] = {
+  private def toposort(cs: Migrations.Sequence[Migrations.Connections]): IntSequence = {
     val nodes = cs.rng
     val cxns = new Sequence[Connections](nodes)
     for { node <- nodes } {
       cxns(node) = cs(node).copy
     }
 
-    val placed = new Sequence[Boolean](nodes)
-    val nodesByRank = new Sequence[Int](1 to nodes.size)
+    val placed = new BoolSequence(nodes)
+    val nodesByRank = new IntSequence(1 to nodes.size)
 
     var nbPlaced = 0
 
@@ -665,6 +718,7 @@ object Migrations {
 
 object MigrationsApp extends App {
   import Migrations._
+  import co.theasi.plotly._
 
   import org.slf4j.LoggerFactory
 
@@ -672,40 +726,59 @@ object MigrationsApp extends App {
   root.detachAndStopAllAppenders()
 
   println("let's go!")
-  val n = 1200
-  val instances = for { i <- 1 to 10 } yield Instance.random(n, n*100, minC=1, maxC=8)
-
-  println("NAIVE\n=============")
-
-  val grd:Instance=>Schedule = computeSchedule(scheduleByGreedyMatching)
-  val greedyLengths = for { instance <- instances }
-                        yield grd(instance).length
-
-  println("\n\nGREEDY BY EDGE\n=============")
-  val gbe: Instance => Schedule = computeSchedule(scheduleByDstSpace)
-  val gbeLengths = for {instance <- instances }
-                     yield gbe(instance).length
+  val algos = Map("GreedyMatching" -> computeSchedule(scheduleByGreedyMatching) _,
+                  "GreedyByEdge" -> computeSchedule(scheduleByDstSpace) _,
+                  "GreedyByNode" -> computeSchedule(scheduleBySpaceAndDegree) _,
+                  "Cycle&Dag" -> computeSchedule(scheduleByStructure) _,
+                  "Optimal" -> computeSchedule(scheduleByMip) _)
 
 
-  println("\n\nGREEDY BY NODE\n=============")
-  val gbn: Instance => Schedule = computeSchedule(scheduleBySpaceAndDegree)
-  val gbnLengths = for {instance <- instances }
-                     yield gbn(instance).length
-
-  println("\n\nCYCLE AND DAG\n=============")
-  val str: Instance => Schedule = computeSchedule(scheduleByStructure)
-  val strLengths = for {instance <- instances }
-                     yield str(instance).length
-
-
-
-
-
-  println("\n\nCompare:\nNAIVE -- GREEDY_BY_EDGE -- GREEDY_BY_NODE -- CYCLE_AND_DAG \n===============")
-  for { (w, x, y, z) <- (greedyLengths lazyZip  gbeLengths lazyZip  gbnLengths lazyZip  strLengths ) } {
-    println(s"$w -- $x -- $y -- $z")
+  def run(plotName: String, algos: Map[String, Instance=>Schedule], nodeCnts: Seq[Int], nbEdges: Int=>Int, minC: Int, maxC: Int) = {
+    println(s"[$plotName]")
+    val instanceSets = for { n <- nodeCnts } yield for { i <- 1 to 10 } yield Instance.random(n, nbEdges(n), minC, maxC)
+    val crampedInstances = nodeCnts.zip(instanceSets).toMap
+    //val roomyInstances = for { (n, instanceSet) <- crampedInstances } yield n -> instanceSet.map(_.spacify)
+    def subrun(subname: String, instances: Map[Int, Seq[Instance]]) = {
+      var p = Plot()
+      def marker(name: String) = ScatterOptions().mode(ScatterMode.Marker).name(name)
+      for { (algname, alg) <- algos } {
+        println(s"\n\n$algname\n==============")
+        val (sizes, lengths) = (for { n <- nodeCnts
+                                      instance <- instances(n) } yield (n, alg(instance).length)).unzip
+        for { (n, lens) <- (sizes zip lengths).groupBy(_._1)} {
+          println(s"\t[$n]")
+          for { (_, len) <- lens} {
+            println(s"\t\t$len")
+          }
+          println(s"\t  ave: ${lens.unzip._2.sum * 1.0 / lens.size}")
+        }
+        p = p.withScatter(sizes, lengths, marker(algname))
+      }
+      var doneDrawing = false
+      while (!doneDrawing) {
+        try {
+          draw(p, plotName + "-" + subname, writer.FileOptions(overwrite = true))
+        } catch {
+          case x: Exception => {
+            x.printStackTrace()
+            Thread.sleep(1000)
+            println("    .... retrying plotly")
+          }
+        }
+        doneDrawing = true
+      }
+    }
+    subrun("constrained", crampedInstances)
+    //subrun("unlimited", roomyInstances)
   }
-  println(s"\nAverage schedule length: ${greedyLengths.sum*1.0/greedyLengths.size} <<>> ${gbeLengths.sum*1.0/gbeLengths.size} <<>> ${gbnLengths.sum*1.0/gbnLengths.size} <<>> ${strLengths.sum*1.0/strLengths.size} ")
+
+  run("migration-small-homo", algos, Seq(10, 20, 30, 40, 50), n=>(n*Math.log(n)).toInt, 2, 2)
+  run("migration-small-hetero", algos, Seq(10, 20, 30, 40, 50), n=>(n*Math.log(n)).toInt, 1, 4)
+  run("migration-medium-homo", algos-"Optimal", Seq(10, 20, 30, 40, 50, 60, 70, 80, 90, 100), n=>n*n, 2, 2)
+  run("migration-medium-hetero", algos-"Optimal", Seq(10, 20, 30, 40, 50, 60, 70, 80, 90, 100), n=>n*n, 1, 4)
+  run("migration-large-homo", algos-"Optimal", Seq(200, 400, 600, 800, 1000), n=>n*100, 5, 5)
+  run("migration-large-hetero", algos-"Optimal", Seq(200, 400, 600, 800, 1000), n=>n*100, 1, 8)
+
 }
 
 
@@ -748,5 +821,45 @@ object SillyTest extends App {
   println("\n\nStruct:\n=====================")
   println(computeSchedule(scheduleByStructure)(instance))
 
+
+}
+
+
+
+object PlotTest extends App {
+
+
+
+  import co.theasi.plotly._
+  import util.Random
+
+  val n = 500
+
+  val xs = (0 until n).map { i => Random.nextDouble }
+  val ys0 = (0 until n).map { i => Random.nextDouble + 2.0 }
+  val ys1 = (0 until n).map { i => Random.nextDouble - 2.0 }
+
+  val p = Plot()
+          .withScatter(xs, ys0, ScatterOptions()
+                                .mode(ScatterMode.Marker)
+                                .name("Above")
+                                //.marker(
+                                //  MarkerOptions()
+                                //  .size(10)
+                                //  .color(152, 0, 0, 0.8)
+                                //  .lineWidth(2)
+                                //  .lineColor(0, 0, 0)))
+                       )
+          .withScatter(xs, ys1, ScatterOptions()
+                                .mode(ScatterMode.Marker)
+                                .name("Below")
+                                //.marker(
+                                //  MarkerOptions()
+                                //  .size(10)
+                                //  .color(255, 182, 193, 0.9)
+                                //  .lineWidth(2)))
+                       )
+
+  draw(p, "styled-scatter", writer.FileOptions(overwrite=true))
 
 }
