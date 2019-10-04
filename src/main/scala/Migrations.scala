@@ -730,7 +730,7 @@ object MigrationsApp extends App {
                   "GreedyByEdge" -> computeSchedule(scheduleByDstSpace) _,
                   "GreedyByNode" -> computeSchedule(scheduleBySpaceAndDegree) _,
                   "Cycle&Dag" -> computeSchedule(scheduleByStructure) _,
-                  "Optimal" -> computeSchedule(scheduleByMip) _)
+                  "Optimal" -> computeSchedule(scheduleByMip) _ )
 
 
   def run(plotName: String, algos: Map[String, Instance=>Schedule], nodeCnts: Seq[Int], nbEdges: Int=>Int, minC: Int, maxC: Int) = {
@@ -772,8 +772,8 @@ object MigrationsApp extends App {
     //subrun("unlimited", roomyInstances)
   }
 
-  run("migration-small-homo", algos, Seq(10, 20, 30, 40, 50), n=>(n*Math.log(n)).toInt, 2, 2)
-  run("migration-small-hetero", algos, Seq(10, 20, 30, 40, 50), n=>(n*Math.log(n)).toInt, 1, 4)
+  run("migration-small-homo", algos-"Optimal", Seq(10, 20, 30, 40, 50), n=>(n*Math.log(n)).toInt, 2, 2)
+  run("migration-small-hetero", algos-"Optimal", Seq(10, 20, 30, 40, 50), n=>(n*Math.log(n)).toInt, 1, 4)
   run("migration-medium-homo", algos-"Optimal", Seq(10, 20, 30, 40, 50, 60, 70, 80, 90, 100), n=>n*n, 2, 2)
   run("migration-medium-hetero", algos-"Optimal", Seq(10, 20, 30, 40, 50, 60, 70, 80, 90, 100), n=>n*n, 1, 4)
   run("migration-large-homo", algos-"Optimal", Seq(200, 400, 600, 800, 1000), n=>n*100, 5, 5)
